@@ -12,6 +12,15 @@ import { NextRequest, NextResponse } from "next/server";
  * meme d'arriver ici.
  */
 
+// IMPORTANT : sans ceci, Next.js App Router met en cache par defaut les reponses
+// GET des route handlers (Full Route Cache). Une premiere requete lancee juste
+// apres la fin d'une analyse (avant que le job precedent n'ait fini d'ecrire ses
+// resultats) pouvait donc rester "figee" en cache et etre reservie a l'identique
+// indefiniment, meme apres que les vraies donnees existent en base -- symptome
+// observe : "opportunites (0)" qui ne se met jamais a jour. `force-dynamic`
+// desactive tout cache sur cette route, chaque requete est reexecutee.
+export const dynamic = "force-dynamic";
+
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || "";
 
