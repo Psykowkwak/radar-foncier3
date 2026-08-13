@@ -43,6 +43,7 @@ from app.services.feasibility import FeasibilityInputs, compute_feasibility
 from app.services.geometry import (
     building_coverage_ratio,
     compute_geometry_metrics,
+    force_2d,
     geojson_to_shape,
     largest_contiguous_unbuilt_area,
     reproject_to_lambert93,
@@ -531,7 +532,7 @@ def _upsert_buildings(db, features: list[dict], provider_result: ProviderResult)
     buildings: list[Building] = []
     for feature in features:
         try:
-            geom = geojson_to_shape(feature["geometry"])
+            geom = force_2d(geojson_to_shape(feature["geometry"]))
         except Exception:  # noqa: BLE001
             continue
         geom_l93 = _ensure_multipolygon(reproject_to_lambert93(geom))
