@@ -97,6 +97,19 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
         # --- URBANISME (zonage GPU) ---
         urbanism_provider = UrbanismProvider()
         zone_result = urbanism_provider.fetch_by_partition(code_insee)
+        # Repli documente (voir connectors/urbanism.py) : le mode "partition" suppose
+        # que le document est reference exactement sous "DU_<insee>", ce qui echoue
+        # pour certaines communes (ex. PLU intercommunal reference sous le SIREN de
+        # l'EPCI plutot que le code INSEE communal). Si aucune zone n'est trouvee par
+        # partition, on retente par intersection geometrique avec le contour de la
+        # commune (deja recupere via le cadastre), plus robuste au nommage exact du
+        # document -- voir docs/DATA_SOURCES.md B.1.
+        if not zone_result.data and commune_result.data:
+            commune_geometry = commune_result.data[0].get("geometry")
+            if commune_geometry:
+                geom_fallback_result = urbanism_provider.fetch_by_geometry(commune_geometry)
+                if geom_fallback_result.data:
+                    zone_result = geom_fallback_result
         _record_warnings(db, job, None, zone_result)
         zones = _upsert_zones(db, municipality, zone_result.data or [], zone_result)
         gpu_data_available = bool(zones)
@@ -144,9 +157,14 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
             )
             built_cat = classify_built_category(coverage)
 
-            typezone, _zone_found = _majority_zone(parcel_geom_l93, zone_index, zone_geoms)
+            # IMPORTANT (correction) : c'est le resultat PAR PARCELLE (`zone_found`,
+            # intersection reelle avec une zone) qui doit determiner la confiance --
+            # pas `gpu_data_available` qui indique seulement qu'AU MOINS UNE zone
+            # existe pour toute la commune. Utiliser ce dernier ici masquerait les
+            # parcelles qui ne recoupent effectivement aucune zone connue.
+            typezone, zone_found = _majority_zone(parcel_geom_l93, zone_index, zone_geoms)
             constructibility_status, urbanism_confidence = classify_constructibility(
-                typezone, gpu_data_available, metrics.geometry_quality_score
+                typezone, zone_found, metrics.geometry_quality_score
             )
 
             known_flags = [
