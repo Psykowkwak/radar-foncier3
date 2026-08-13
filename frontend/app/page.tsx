@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getAnalysisJob, getOpportunities, launchAnalysis } from "@/lib/api";
+import { getAnalysisJob, getOpportunities, getTopOpportunities, launchAnalysis } from "@/lib/api";
 import type { AnalysisJob, Filters, MunicipalitySearchResult, Opportunity } from "@/lib/types";
 import MunicipalitySearch from "@/components/MunicipalitySearch";
 import FilterPanel from "@/components/FilterPanel";
@@ -32,6 +32,11 @@ export default function HomePage() {
   const [selectedParcelId, setSelectedParcelId] = useState<string | null>(null);
   const [flyToParcelId, setFlyToParcelId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Deux modes de classement (voir backend app/api/routes/opportunities.py) :
+  // "score" = score_global (urbanisme/geometrie/...), "rentabilite" = marge
+  // apparente estimee du bilan promoteur simplifie (app/services/feasibility.py),
+  // qui exclut les parcelles ou le gain reel ne couvre pas demolition + construction.
+  const [rankingMode, setRankingMode] = useState<"score" | "rentabilite">("score");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -92,10 +97,16 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!municipality || job?.status !== "COMPLETED") return;
+    if (rankingMode === "rentabilite") {
+      getTopOpportunities(municipality.insee_code, 50)
+        .then(setFilteredParcels)
+        .catch((e) => setError(e instanceof Error ? e.message : "Erreur de chargement du classement rentabilite"));
+      return;
+    }
     getOpportunities(municipality.insee_code, filters)
       .then(setFilteredParcels)
       .catch((e) => setError(e instanceof Error ? e.message : "Erreur de chargement des opportunites"));
-  }, [municipality, job?.status, filters]);
+  }, [municipality, job?.status, filters, rankingMode]);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -142,7 +153,36 @@ export default function HomePage() {
 
         {error && <div className="warning-box">{error}</div>}
 
-        <FilterPanel filters={filters} onChange={setFilters} />
+        <div className="section-block">
+          <h2>Classement</h2>
+          <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
+            <button
+              className="btn-primary"
+              style={{ background: rankingMode === "score" ? "var(--color-accent)" : "var(--color-text-muted)" }}
+              onClick={() => setRankingMode("score")}
+            >
+              Meilleur score
+            </button>
+            <button
+              className="btn-primary"
+              style={{ background: rankingMode === "rentabilite" ? "var(--color-accent)" : "var(--color-text-muted)" }}
+              onClick={() => setRankingMode("rentabilite")}
+            >
+              Top 50 rentabilite
+            </button>
+          </div>
+          {rankingMode === "rentabilite" && (
+            <p style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+              Classe par marge apparente estimee (prix de vente DVF reel - foncier -
+              demolition eventuelle - construction), pas par score d&apos;urbanisme. Une
+              maison existante couteuse a demolir pour un gain marginal ressort en bas
+              ou disparait du classement. Estimation d&apos;ordre de grandeur, ne
+              remplace pas une etude de faisabilite.
+            </p>
+          )}
+        </div>
+
+        {rankingMode === "score" && <FilterPanel filters={filters} onChange={setFilters} />}
       </aside>
 
       <main className="map-container">
@@ -156,8 +196,15 @@ export default function HomePage() {
 
       <aside className="panel panel-right">
         <ParcelSummaryPanel parcel={selectedParcel} />
-        <h2>Opportunites ({filteredParcels.length})</h2>
-        <OpportunityList opportunities={filteredParcels} selectedParcelId={selectedParcelId} onSelect={handleSelectParcel} />
+        <h2>
+          {rankingMode === "rentabilite" ? "Top rentabilite" : "Opportunites"} ({filteredParcels.length})
+        </h2>
+        <OpportunityList
+          opportunities={filteredParcels}
+          selectedParcelId={selectedParcelId}
+          onSelect={handleSelectParcel}
+          showMargin={rankingMode === "rentabilite"}
+        />
       </aside>
     </div>
   );

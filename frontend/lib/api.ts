@@ -55,6 +55,10 @@ export function getOpportunities(insee: string, filters: Partial<Filters> = {}):
   return request(`/api/municipalities/${insee}/opportunities${qs ? `?${qs}` : ""}`);
 }
 
+export function getTopOpportunities(insee: string, limit = 50): Promise<Opportunity[]> {
+  return request(`/api/municipalities/${insee}/top-opportunities?limit=${limit}`);
+}
+
 export function getParcel(parcelId: string): Promise<ParcelDetail> {
   return request(`/api/parcels/${parcelId}`);
 }

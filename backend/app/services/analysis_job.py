@@ -24,11 +24,13 @@ from sqlalchemy import delete, select
 from app.connectors.base import ProviderResult
 from app.connectors.buildings import BuildingProvider
 from app.connectors.cadastre import CadastreProvider
+from app.connectors.dvf import DVFProvider
 from app.connectors.risk import RiskProvider
 from app.connectors.urbanism import UrbanismProvider
 from app.core.db import SessionLocal
 from app.models.analysis import AnalysisJob, AnalysisWarning, ParcelAnalysis
 from app.models.building import Building, ParcelBuilding
+from app.models.economics import CostAssumption, ParcelFeasibility
 from app.models.enums import AnalysisJobStatusEnum, RiskLevelEnum, RiskTypeEnum, SeverityEnum
 from app.models.municipality import Municipality
 from app.models.parcel import Parcel
@@ -37,6 +39,7 @@ from app.models.scoring import ParcelScore
 from app.models.source import SourceRecord
 from app.models.urbanism import UrbanismZone
 from app.services.built_category import classify_built_category
+from app.services.feasibility import FeasibilityInputs, compute_feasibility
 from app.services.geometry import (
     building_coverage_ratio,
     compute_geometry_metrics,
@@ -108,6 +111,8 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
         parcels = _upsert_parcels(db, municipality, parcel_features, parcelles_result)
         _update_progress(db, job, "cadastre")
 
+        commune_geometry = commune_result.data[0].get("geometry") if commune_result.data else None
+
         # --- URBANISME (zonage GPU) ---
         urbanism_provider = UrbanismProvider()
         zone_result = urbanism_provider.fetch_by_partition(code_insee)
@@ -118,12 +123,10 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
         # partition, on retente par intersection geometrique avec le contour de la
         # commune (deja recupere via le cadastre), plus robuste au nommage exact du
         # document -- voir docs/DATA_SOURCES.md B.1.
-        if not zone_result.data and commune_result.data:
-            commune_geometry = commune_result.data[0].get("geometry")
-            if commune_geometry:
-                geom_fallback_result = urbanism_provider.fetch_by_geometry(commune_geometry)
-                if geom_fallback_result.data:
-                    zone_result = geom_fallback_result
+        if not zone_result.data and commune_geometry:
+            geom_fallback_result = urbanism_provider.fetch_by_geometry(commune_geometry)
+            if geom_fallback_result.data:
+                zone_result = geom_fallback_result
         _record_warnings(db, job, None, zone_result)
         zones = _upsert_zones(db, municipality, zone_result.data or [], zone_result)
         gpu_data_available = bool(zones)
@@ -131,8 +134,13 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
         _update_progress(db, job, "urbanisme")
 
         # --- BATI ---
+        # CORRECTION (voir incident du 2026-08-13) : l'ancienne source (Etalab
+        # cadastre.data.gouv.fr) renvoyait 404 pour toutes les communes, neutralisant
+        # score_surface + score_densification partout. Remplacee par le flux WFS IGN
+        # BD TOPO (voir app/connectors/buildings.py), qui necessite la geometrie
+        # communale (bbox) plutot que le seul code INSEE.
         building_provider = BuildingProvider()
-        building_result = building_provider.fetch(code_insee=code_insee)
+        building_result = building_provider.fetch(code_insee=code_insee, commune_geometry=commune_geometry)
         _record_warnings(db, job, None, building_result)
         buildings = _upsert_buildings(db, building_result.data or [], building_result)
         building_data_available = building_result.success and bool(buildings)
@@ -148,7 +156,20 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
         risk_level, risk_data_available = _store_commune_risks(db, municipality, rga_result, cavite_result)
         _update_progress(db, job, "risques")
 
-        # --- RESEAUX (stub explicite au MVP, voir docs/DATA_SOURCES.md E/F) ---
+        # --- RESEAUX / DONNEES ECONOMIQUES DVF ---
+        # Le reseau (voirie/eau/electricite) reste hors MVP (stub, voir
+        # docs/DATA_SOURCES.md E/F) ; ce palier de progression recupere en plus les
+        # prix de vente reels (DVF) necessaires au bilan promoteur simplifie
+        # (app/services/feasibility.py), une fois par commune pour tout le job.
+        dvf_provider = DVFProvider()
+        dvf_result = dvf_provider.fetch_commune(code_insee)
+        _record_warnings(db, job, None, dvf_result)
+        dvf_data = dvf_result.data or {}
+        price_per_m2_bati_dvf = dvf_data.get("price_per_m2_bati")
+        price_per_m2_terrain_dvf = dvf_data.get("price_per_m2_terrain")
+        dvf_sample_size_bati = dvf_data.get("sample_size_bati")
+        dvf_sample_size_terrain = dvf_data.get("sample_size_terrain")
+        cost_assumption = _get_default_cost_assumption(db)
         _update_progress(db, job, "reseaux")
 
         # --- SCORING ---
@@ -239,6 +260,49 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
             )
             db.add(score)
 
+            # --- FAISABILITE (bilan promoteur simplifie, voir app/services/feasibility.py) ---
+            # Non calcule pour les parcelles deja exclues (pas de potentiel a chiffrer).
+            if not result.excluded:
+                existing_building_footprint = (coverage * metrics.area_m2) if coverage is not None else None
+                feasibility_inputs = FeasibilityInputs(
+                    parcel_area_m2=metrics.area_m2,
+                    constructibility_status=constructibility_status,
+                    largest_contiguous_unbuilt_area_m2=largest_unbuilt if building_data_available else None,
+                    existing_building_footprint_m2=existing_building_footprint,
+                    price_per_m2_bati_dvf=price_per_m2_bati_dvf,
+                    price_per_m2_terrain_dvf=price_per_m2_terrain_dvf,
+                    dvf_sample_size_bati=dvf_sample_size_bati,
+                    dvf_sample_size_terrain=dvf_sample_size_terrain,
+                    construction_cost_per_m2=cost_assumption.construction_cost_per_m2,
+                    demolition_cost_per_m2_footprint=cost_assumption.demolition_cost_per_m2_footprint,
+                    overhead_ratio=cost_assumption.overhead_ratio,
+                )
+                feasibility_result = compute_feasibility(feasibility_inputs)
+                db.add(
+                    ParcelFeasibility(
+                        analysis_id=analysis.id,
+                        cost_assumption_id=cost_assumption.id,
+                        buildable_footprint_m2=feasibility_result.buildable_footprint_m2,
+                        estimated_new_floor_area_m2=feasibility_result.estimated_new_floor_area_m2,
+                        existing_building_footprint_m2=feasibility_result.existing_building_footprint_m2,
+                        demolition_recommended=feasibility_result.demolition_recommended,
+                        price_per_m2_bati_dvf=price_per_m2_bati_dvf,
+                        price_per_m2_terrain_dvf=price_per_m2_terrain_dvf,
+                        dvf_sample_size_bati=dvf_sample_size_bati,
+                        dvf_sample_size_terrain=dvf_sample_size_terrain,
+                        estimated_land_cost=feasibility_result.estimated_land_cost,
+                        estimated_demolition_cost=feasibility_result.estimated_demolition_cost,
+                        estimated_construction_cost=feasibility_result.estimated_construction_cost,
+                        estimated_overhead_cost=feasibility_result.estimated_overhead_cost,
+                        estimated_revenue=feasibility_result.estimated_revenue,
+                        estimated_margin=feasibility_result.estimated_margin,
+                        margin_ratio=feasibility_result.margin_ratio,
+                        computable=feasibility_result.computable,
+                        explanation_text=feasibility_result.explanation_text,
+                        computed_at=computed_at,
+                    )
+                )
+
             if result.excluded:
                 excluded_count += 1
                 for reason in result.exclusion_reasons:
@@ -280,6 +344,7 @@ def _reset_municipality_data(db, municipality: Municipality) -> None:
     )
 
     db.execute(delete(ParcelScore).where(ParcelScore.analysis_id.in_(analysis_ids_subq)))
+    db.execute(delete(ParcelFeasibility).where(ParcelFeasibility.analysis_id.in_(analysis_ids_subq)))
     db.execute(delete(ParcelAnalysis).where(ParcelAnalysis.parcel_id.in_(parcel_ids_subq)))
     db.execute(delete(AnalysisWarning).where(AnalysisWarning.parcel_id.in_(parcel_ids_subq)))
     db.execute(delete(ParcelBuilding).where(ParcelBuilding.parcel_id.in_(parcel_ids_subq)))
@@ -287,6 +352,25 @@ def _reset_municipality_data(db, municipality: Municipality) -> None:
     db.execute(delete(UrbanismZone).where(UrbanismZone.municipality_id == municipality.id))
     db.execute(delete(Risk).where(Risk.municipality_id == municipality.id))
     db.commit()
+
+
+def _get_default_cost_assumption(db) -> CostAssumption:
+    """Recupere l'hypothese economique par defaut (voir app/models/economics.py) ;
+    la cree si la ligne seed de la migration 0002 est absente (jamais de valeurs
+    codees en dur ici, toujours lues depuis la table)."""
+    existing = db.execute(
+        select(CostAssumption).where(CostAssumption.is_default.is_(True)).limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    fallback = CostAssumption(
+        label="Hypotheses par defaut (creees automatiquement)",
+        is_default=True,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(fallback)
+    db.flush()
+    return fallback
 
 
 def _update_progress(db, job: AnalysisJob, step: str) -> None:

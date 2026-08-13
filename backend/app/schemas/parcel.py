@@ -67,3 +67,9 @@ class OpportunityItem(BaseModel):
     score_global: float
     built_category: str | None
     constructibility_status: str
+    # Bilan promoteur simplifie (voir app/services/feasibility.py) -- None tant que
+    # non calculable (donnees insuffisantes), jamais une valeur inventee.
+    estimated_margin: float | None = None
+    margin_ratio: float | None = None
+    feasibility_computable: bool = False
+    feasibility_explanation: str | None = None

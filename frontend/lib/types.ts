@@ -55,6 +55,13 @@ export interface Opportunity {
   score_global: number;
   built_category: string | null;
   constructibility_status: string;
+  // Bilan promoteur simplifie (voir backend app/services/feasibility.py) -- null
+  // tant que non calculable (donnees bati ou prix DVF insuffisants pour cette
+  // parcelle/commune), jamais une valeur inventee.
+  estimated_margin: number | null;
+  margin_ratio: number | null;
+  feasibility_computable: boolean;
+  feasibility_explanation: string | null;
 }
 
 export interface ParcelScore {

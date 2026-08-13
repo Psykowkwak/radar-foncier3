@@ -8,11 +8,17 @@ interface Props {
   opportunities: Opportunity[];
   selectedParcelId: string | null;
   onSelect: (parcelId: string) => void;
+  showMargin?: boolean;
 }
 
-// Liste triee (deja triee par score_global desc cote API), clic -> selectionne +
-// zoom carte (etat leve dans app/page.tsx, partage entre MapView et OpportunityList).
-export default function OpportunityList({ opportunities, selectedParcelId, onSelect }: Props) {
+function formatEuros(value: number): string {
+  return new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 0 }).format(value) + " EUR";
+}
+
+// Liste triee (deja triee par score_global ou marge estimee cote API selon le
+// mode, voir app/page.tsx), clic -> selectionne + zoom carte (etat leve dans
+// app/page.tsx, partage entre MapView et OpportunityList).
+export default function OpportunityList({ opportunities, selectedParcelId, onSelect, showMargin = false }: Props) {
   if (opportunities.length === 0) {
     return <p style={{ color: "var(--color-text-muted)" }}>Aucune opportunite pour ces filtres.</p>;
   }
@@ -33,6 +39,13 @@ export default function OpportunityList({ opportunities, selectedParcelId, onSel
             {opp.parcel_area != null ? `${Math.round(opp.parcel_area)} m2` : "Surface inconnue"}
             {opp.built_category ? ` · ${opp.built_category}` : ""}
           </div>
+          {showMargin && (
+            <div style={{ fontSize: 12, marginTop: 4, fontWeight: 600 }}>
+              {opp.estimated_margin != null
+                ? `Marge estimee : ${formatEuros(opp.estimated_margin)}`
+                : "Estimation indisponible"}
+            </div>
+          )}
           <div style={{ fontSize: 12, marginTop: 4 }}>
             <Link href={`/parcel/${opp.parcel_id}`} onClick={(e) => e.stopPropagation()}>
               Voir la fiche complete &rarr;
