@@ -9,8 +9,14 @@ import MapView from "@/components/MapView";
 import OpportunityList from "@/components/OpportunityList";
 import ParcelSummaryPanel from "@/components/ParcelSummaryPanel";
 
+// Score minimum par defaut a 60 : "parcelles_selectionnees" (retenues) ne signifie
+// que "non exclue d'office" (voir docs/SCORING_ENGINE.md), pas "bonne opportunite"
+// -- sur une grande commune, la quasi-totalite des parcelles est "retenue" au sens
+// strict. Sans un filtre par defaut, la premiere liste affichee est illisible
+// (plusieurs milliers d'items) et peu utile. L'utilisateur peut redescendre le
+// filtre a 0 pour tout voir.
 const DEFAULT_FILTERS: Filters = {
-  min_score: null,
+  min_score: 60,
   min_area: null,
   max_area: null,
   operation_type: null,
