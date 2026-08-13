@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pyproj
+import shapely
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform, unary_union
@@ -20,6 +21,16 @@ LAMBERT93 = "EPSG:2154"
 
 _to_l93 = pyproj.Transformer.from_crs(WGS84, LAMBERT93, always_xy=True).transform
 _to_wgs84 = pyproj.Transformer.from_crs(LAMBERT93, WGS84, always_xy=True).transform
+
+
+def force_2d(geometry: BaseGeometry) -> BaseGeometry:
+    """Supprime la dimension Z (altitude) d'une geometrie -- necessaire pour le bati
+    IGN BD TOPO (voir app/connectors/buildings.py), qui fournit une altitude par
+    sommet (ex. hauteur de toit). Les colonnes PostGIS du MVP sont toutes definies
+    en 2D (voir alembic/versions/0001_initial.py, geometry_type="MULTIPOLYGON" sans
+    "Z") -- une insertion avec Z echoue sinon avec
+    "Geometry has Z dimension but column does not" (incident du 2026-08-13)."""
+    return shapely.force_2d(geometry)
 
 
 def reproject_to_lambert93(geometry: BaseGeometry) -> BaseGeometry:
