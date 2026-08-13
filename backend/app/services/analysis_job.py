@@ -19,6 +19,7 @@ from geoalchemy2.shape import from_shape, to_shape
 from shapely.geometry import MultiPolygon
 from shapely.geometry.base import BaseGeometry
 from shapely.strtree import STRtree
+from sqlalchemy import delete, select
 
 from app.connectors.base import ProviderResult
 from app.connectors.buildings import BuildingProvider
@@ -75,6 +76,19 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
         if municipality is None:
             _fail_job(db, job, "Commune introuvable")
             return
+
+        # CORRECTION CRITIQUE (voir incident du 2026-08-13) : sans ceci, relancer une
+        # analyse sur une commune deja analysee accumule indefiniment de nouvelles
+        # lignes Parcel (aucune notion d'upsert au MVP -- _upsert_parcels cree
+        # toujours de nouvelles lignes). L'API /opportunities ne filtrant pas par
+        # job, elle additionnait alors TOUTES les parcelles de TOUTES les analyses
+        # passees (ex. Deauville analysee 6 fois -> 20544 parcelles au lieu de 3424,
+        # 6x trop de donnees, payload JSON geant -> le navigateur se figeait
+        # completement : liste vide, carte non cliquable). Au MVP une analyse
+        # represente l'etat courant de la commune, pas un historique : on purge
+        # donc integralement les donnees parcellaires precedentes avant d'en
+        # reinserer de nouvelles.
+        _reset_municipality_data(db, municipality)
 
         job.status = AnalysisJobStatusEnum.RUNNING
         job.started_at = datetime.now(timezone.utc)
@@ -251,6 +265,28 @@ def run_analysis_job(job_id: uuid.UUID) -> None:
             _fail_job(db, job, str(exc))
     finally:
         db.close()
+
+
+def _reset_municipality_data(db, municipality: Municipality) -> None:
+    """Purge les donnees d'analyses precedentes pour cette commune avant d'en
+    inserer de nouvelles -- voir commentaire dans run_analysis_job(). Supprime,
+    dans l'ordre impose par les contraintes de cle etrangere (pas de cascade
+    DB au MVP) : ParcelScore -> ParcelAnalysis / AnalysisWarning / ParcelBuilding
+    -> Parcel, puis UrbanismZone et Risk (tous deux lies directement a
+    municipality_id)."""
+    parcel_ids_subq = select(Parcel.id).where(Parcel.municipality_id == municipality.id).scalar_subquery()
+    analysis_ids_subq = (
+        select(ParcelAnalysis.id).where(ParcelAnalysis.parcel_id.in_(parcel_ids_subq)).scalar_subquery()
+    )
+
+    db.execute(delete(ParcelScore).where(ParcelScore.analysis_id.in_(analysis_ids_subq)))
+    db.execute(delete(ParcelAnalysis).where(ParcelAnalysis.parcel_id.in_(parcel_ids_subq)))
+    db.execute(delete(AnalysisWarning).where(AnalysisWarning.parcel_id.in_(parcel_ids_subq)))
+    db.execute(delete(ParcelBuilding).where(ParcelBuilding.parcel_id.in_(parcel_ids_subq)))
+    db.execute(delete(Parcel).where(Parcel.municipality_id == municipality.id))
+    db.execute(delete(UrbanismZone).where(UrbanismZone.municipality_id == municipality.id))
+    db.execute(delete(Risk).where(Risk.municipality_id == municipality.id))
+    db.commit()
 
 
 def _update_progress(db, job: AnalysisJob, step: str) -> None:
